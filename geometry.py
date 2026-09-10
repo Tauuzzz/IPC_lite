@@ -3,6 +3,119 @@ from typing import Tuple
 import warp as wp
 import numpy as np
 
+
+# ---------------------------------------------------------------------------
+# 规则四面体网格生成（学习用 demo 网格）
+# ---------------------------------------------------------------------------
+
+def build_regular_tet_grid(nc: int, size: float = 0.2):
+    """生成 nc x nc x nc 个 cell 的规则四面体网格（每个 cube 拆 6 个 tet）。
+
+    Returns:
+        verts_np: ((nc+1)^3, 3) float32 顶点坐标，按 (i, j, k) 顺序
+        tets_np:  (6*nc^3, 4) int32 tet 顶点索引
+        pinned_np: ((nc+1)^3,) bool，z=0 层固定
+    """
+    nv = nc + 1
+    h = size / nc
+
+    # 顶点 (i, j, k) -> index i + j*nv + k*nv*nv
+    verts = np.zeros((nv * nv * nv, 3), dtype=np.float32)
+    for k in range(nv):
+        for j in range(nv):
+            for i in range(nv):
+                verts[i + j * nv + k * nv * nv] = (i * h, j * h, k * h)
+
+    # 每个 cell 拆成 6 个 tet：绕主对角线 (a, a2, b2, d2) 的 6 个非退化 tet。
+    # 局部角点编号：0=a 1=b 2=c 3=d 4=a2 5=b2 6=c2 7=d2
+    #   a=(0,0,0) b=(1,0,0) c=(0,1,0) d=(1,1,0)
+    #   a2=(0,0,1) b2=(1,0,1) c2=(0,1,1) d2=(1,1,1)
+    tets = []
+    for k in range(nc):
+        for j in range(nc):
+            for i in range(nc):
+                base = i + j * nv + k * nv * nv
+                v = [
+                    base,            # 0 a
+                    base + 1,        # 1 b
+                    base + nv,       # 2 c
+                    base + nv + 1,   # 3 d
+                    base + nv * nv,          # 4 a2
+                    base + 1 + nv * nv,      # 5 b2
+                    base + nv + nv * nv,     # 6 c2
+                    base + nv + 1 + nv * nv, # 7 d2
+                ]
+                for tet in [(0,1,3,7), (0,1,7,5), (0,2,7,3), (0,2,6,7), (0,4,5,7), (0,4,7,6)]:
+                    tets.append(tuple(v[idx] for idx in tet))
+
+    tets_np = np.asarray(tets, dtype=np.int32)
+
+    # 固定 z=0 层
+    pinned_np = np.zeros(nv * nv * nv, dtype=bool)
+    for j in range(nv):
+        for i in range(nv):
+            pinned_np[i + j * nv] = True
+
+    return verts, tets_np, pinned_np
+
+
+def build_two_cubes(nc: int = 2, size: float = 0.2, gap: float = 0.03, lateral: float = 0.02):
+    """上下两块相隔 gap 的立方体：底部固定，顶部带横向偏移。
+
+    跨物体的 PT/EE 对是正常对（初始距离 = gap > 0），不会被候选过滤删掉，
+    互相靠近到 d < d_tilde 时 barrier 激活；顶部横向滑移激发摩擦。
+
+    Returns:
+        verts_np, tets_np, pinned_np（同 build_regular_tet_grid）
+    """
+    verts0, tets0, pinned0 = build_regular_tet_grid(nc, size)
+    verts1, tets1, _ = build_regular_tet_grid(nc, size)
+
+    # 上块：抬高 size+gap，x 方向横移 lateral
+    verts1 = verts1.astype(np.float64)
+    verts1[:, 0] += lateral
+    verts1[:, 2] += size + gap
+
+    offset = verts0.shape[0]
+    verts = np.concatenate([verts0, verts1.astype(np.float32)])
+    tets = np.concatenate([tets0, tets1 + offset])
+    pinned = np.concatenate([pinned0, np.zeros(verts1.shape[0], dtype=bool)])
+    return verts, tets, pinned
+
+
+def filter_degenerate_candidates(
+    surface_faces_np,
+    surface_edges_np,
+    rest_positions_np,
+    threshold_sq: float = 1e-12,
+    device: str = "cpu",
+):
+    """去掉初始构型上距离严格为 0 的 PT/EE 候选对。
+
+    固定候选集合的设计里，同一表面相邻（共面、共享边）的三角形之间
+    会出现"顶点 vs 相邻面"距离 = 0 的退化对（例如正方形沿对角线剖成
+    两个三角形，对角的顶点投影落在共享对角线上）。barrier 在 d=0 处
+    发散，必须把这些对提前剔除。真实 IPC 每 step 重建候选集合，
+    用 broad-phase + 距离阈值就天然不会产生这种对。
+
+    注意：这里只剔距离 == 0 的退化为，阈值和 barrier 的 d_tilde 无关，
+    否则会把初始距离在 d_tilde 以内的正常对（比如两个快要接触的物体）
+    也删掉，接触就永远触发不了了。
+    """
+    verts = wp.array(rest_positions_np.astype(np.float32), dtype=wp.vec3, device=device)
+    PT_pair = make_PT_candidates(surface_faces_np, device=device)
+    EE_pair = make_EE_candidates(surface_edges_np, device=device)
+
+    PT_distances_squared, EE_distances_squared, _, _ = compute_distance(
+        verts, PT_pair, EE_pair, max(1e-9, threshold_sq**0.5)
+    )
+    PT_keep = PT_distances_squared.numpy() > threshold_sq
+    EE_keep = EE_distances_squared.numpy() > threshold_sq
+
+    PT_pair = wp.array(PT_pair.numpy()[PT_keep], dtype=wp.vec4i, device=device)
+    EE_pair = wp.array(EE_pair.numpy()[EE_keep], dtype=wp.vec4i, device=device)
+    return PT_pair, EE_pair
+
 @wp.kernel
 def extract_all_faces(tet_indices: wp.array[wp.vec4i],
                           surface_faces: wp.array[wp.vec3i]

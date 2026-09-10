@@ -30,6 +30,7 @@ def combine_energy(
     PT_total: wp.array[float],
     EE_total: wp.array[float],
     friction_total: wp.array[float],
+    kinetic_total: wp.array[float],
     total_energy: wp.array[float],
 ):
     total_energy[0] = (
@@ -37,4 +38,5 @@ def combine_energy(
         + PT_total[0]
         + EE_total[0]
         + friction_total[0]
+        + kinetic_total[0]
     )

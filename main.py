@@ -1,64 +1,86 @@
-import warp as wp
+"""IPC 学习版主流程。
+
+一个时间步 = 惯性预测 + lagged 摩擦数据 + Newton 求解(梯度/FD Hessian/线搜索) + 速度更新。
+
+运行的是 2x2x2 小正方体网格（81 个自由度），顶部给一个向下的速度压向
+底部固定层，同时带横向滑移（激发 barrier 和 friction 两类能量）。
+FD Hessian 开销随自由度线性增长，demo 网格小才跑得动；大网格请换解析 Hessian。
+"""
+
 import numpy as np
+import warp as wp
 
 import geometry
 import energy
+from mass import compute_lumped_masses
+from newton_solver import NewtonSolver
 
-device="cuda:0"
+device = "cuda:0"
 
-num_vertices = 1000
-num_tets=500
-
+# ---------------- 物理参数 ----------------
 # Strain energy constants
-NIU=0.1
-E=1e5
+NIU = 0.1
+E = 1e5
 
 # Lame constants
-mu=E/(2*(1+NIU))
-lamda=E*NIU/((1+NIU)*(1-2*NIU))
-
-# 参考位置
-rest_positions=wp.empty(num_vertices, dtype=wp.vec3, device=device)
-
-velocity=wp.empty(num_vertices, dtype=wp.vec3, device=device)
-# 当前位置
-positions=wp.empty(num_vertices, dtype=wp.vec3, device=device, requires_grad=True)
-# 滞后位置（上一时间步的 x_hat），摩擦几何全部在这个构型上算好后冻结
-positions_prev=wp.empty(num_vertices, dtype=wp.vec3, device=device)
-# 四面体的顶点索引序号
-tet_indices=wp.empty(num_tets, dtype=wp.vec4i, device=device)
-# 四面体参考体积
-rest_volumes=wp.empty(num_tets, dtype=float, device=device)
-# 四面体应变能
-tet_energies=wp.empty(num_tets, dtype=float, device=device, requires_grad=True)
-
-# 参考边矩阵
-Dm=wp.empty(num_tets, dtype=wp.mat33, device=device)
-# Dm的逆
-Dm_inv=wp.empty(num_tets, dtype=wp.mat33, device=device)
-# 变形边矩阵
-Ds=wp.empty(num_tets, dtype=wp.mat33, device=device)
-# 变形梯度
-F=wp.empty(num_tets, dtype=wp.mat33, device=device)
-
-# 四面体全部面
-all_faces=wp.empty(num_tets*4, dtype=wp.vec3i, device=device)
+mu = E / (2 * (1 + NIU))
+lamda = E * NIU / ((1 + NIU) * (1 - 2 * NIU))
 
 # Barrier constant
-d_tilde=1e-3
+d_tilde = 1e-3
 kappa = 1e5
 
 # 时间步长
 DT = 0.01
 
 # Friction constant
-# 摩擦系数
 friction_mu = 0.3
-# 摩擦光滑化的速度阈值
 eps_v = 1e-3
-# 位移阈值，f0 的分段点
 y_eps = DT * eps_v
 
+# 密度
+rho = 1000.0
+GRAVITY = np.array([0.0, 0.0, -9.8])
+
+# ---------------- demo 网格参数 ----------------
+NC = 2          # 每轴 cell 数（单块 2 -> 27 顶点 / 48 tets）
+SIZE = 0.2      # 边长
+GAP = 0.03      # 两块之间初始间隙（> d_tilde，接近时 barrier 激活）
+LATERAL = 0.02  # 上块的横向偏移（碰撞时激发摩擦滑动）
+NUM_STEPS = 8   # 时间步数（FD Hessian 偏慢，先跑几步验证）
+MAX_NEWTON_ITER = 15
+TOL_G = 1e-6
+TOL_X = 1e-8
+
+# ---------------- 网格生成（上下两块立方体，底部固定） ----------------
+verts_np, tets_np, pinned_np = geometry.build_two_cubes(NC, SIZE, GAP, LATERAL)
+num_vertices = verts_np.shape[0]
+num_tets = tets_np.shape[0]
+pinned_flat = np.repeat(pinned_np, 3)          # (3n,) bool
+free2d = ~pinned_np[:, None]                   # (n,1) bool，用于 numpy 广播
+
+print(f"网格: {num_vertices} 顶点, {num_tets} tets, 固定 {pinned_np.sum()} 顶点")
+
+rest_positions = wp.array(verts_np, dtype=wp.vec3, device=device)
+positions = wp.from_numpy(verts_np, dtype=wp.vec3, device=device, requires_grad=True)
+positions_prev = wp.empty(num_vertices, dtype=wp.vec3, device=device)
+tet_indices = wp.array(tets_np, dtype=wp.vec4i, device=device)
+
+# 参考数据
+Dm = wp.empty(num_tets, dtype=wp.mat33, device=device)
+Dm_inv = wp.empty(num_tets, dtype=wp.mat33, device=device)
+rest_volumes = wp.empty(num_tets, dtype=float, device=device)
+wp.launch(
+    kernel=energy.compute_rest_data,
+    dim=num_tets,
+    inputs=[tet_indices, rest_positions],
+    outputs=[Dm, Dm_inv, rest_volumes],
+    device=device,
+)
+rest_volumes_np = rest_volumes.numpy()
+
+# ---------------- 表面与接触候选对 ----------------
+all_faces = wp.empty(num_tets * 4, dtype=wp.vec3i, device=device)
 wp.launch(
     kernel=geometry.extract_all_faces,
     dim=num_tets,
@@ -66,84 +88,76 @@ wp.launch(
     outputs=[all_faces],
     device=device,
 )
+surface_faces, surface_edges = geometry.extract_surface_faces_and_edges(all_faces)
+surface_faces_np = surface_faces.numpy()
+surface_edges_np = surface_edges.numpy()
 
-surface_faces, surface_edges=geometry.extract_surface_faces_and_edges(all_faces)
-surface_faces_np=surface_faces.numpy()
-surface_edges_np=surface_edges.numpy()
-PT_pair=geometry.make_PT_candidates(surface_faces_np, device=device)
-EE_pair=geometry.make_EE_candidates(surface_edges_np, device=device)
-
-PT_barrier_energies=wp.empty(
-    PT_pair.shape[0],
-    dtype=float,
-    device=device,
-    requires_grad=True,
-)
-EE_barrier_energies=wp.empty(
-    EE_pair.shape[0],
-    dtype=float,
-    device=device,
-    requires_grad=True,
-)
-
-PT_friction_energies=wp.empty(
-    PT_pair.shape[0],
-    dtype=float,
-    device=device,
-    requires_grad=True,
-)
-EE_friction_energies=wp.empty(
-    EE_pair.shape[0],
-    dtype=float,
-    device=device,
-    requires_grad=True,
-)
-
-# 四类能量分别归约为标量，最后再合并为总能量
-elastic_total=wp.zeros(1, dtype=float, device=device, requires_grad=True)
-PT_total=wp.zeros(1, dtype=float, device=device, requires_grad=True)
-EE_total=wp.zeros(1, dtype=float, device=device, requires_grad=True)
-# PT 和 EE 的摩擦能都归约到同一个标量，reduce_energy 用的是 atomic_add
-friction_total=wp.zeros(1, dtype=float, device=device, requires_grad=True)
-total_energy=wp.zeros(1, dtype=float, device=device, requires_grad=True)
-tape=wp.Tape()
-
-'''
-START
-'''
-
-# 计算参考位置的边矩阵
-wp.launch(
-    kernel=energy.compute_rest_data,
-    dim=num_tets,
-    inputs=[
-        tet_indices,
-        rest_positions,
-    ],
-    outputs=[
-        Dm,
-        Dm_inv,
-        rest_volumes,
-    ],
+# 固定候选集合：去掉初始距离 < d_tilde 的退化对（同表面相邻共面对）
+# 固定候选集合：只剔除距离严格为 0 的退化对（同表面相邻共面对）
+PT_pair, EE_pair = geometry.filter_degenerate_candidates(
+    surface_faces_np,
+    surface_edges_np,
+    verts_np,
+    threshold_sq=1e-12,
     device=device,
 )
+print(f"候选对: PT={PT_pair.shape[0]}, EE={EE_pair.shape[0]}")
 
-for step in range(100):
+# ---------------- 质量矩阵 ----------------
+masses_np = compute_lumped_masses(tets_np, rest_volumes_np, num_vertices, rho)
 
-    '''上一步的速度和位置'''
-    position_prev = positions.numpy().copy()
-    velocity_prev = velocity.numpy().copy()
+# ---------------- Newton 求解器 ----------------
+solver = NewtonSolver(
+    device=device,
+    num_vertices=num_vertices,
+    num_tets=num_tets,
+    positions=positions,
+    tet_indices=tet_indices,
+    Dm_inv=Dm_inv,
+    rest_volumes=rest_volumes,
+    mu=mu,
+    lamda=lamda,
+    PT_pair=PT_pair,
+    EE_pair=EE_pair,
+    d_tilde=d_tilde,
+    kappa=kappa,
+    friction_mu=friction_mu,
+    y_eps=y_eps,
+    masses_np=masses_np,
+    dt=DT,
+    pinned_flat=pinned_flat,
+)
 
-    '''惯性预测位置，作为迭代起点'''
-    position_hat = position_prev + velocity_prev * DT
+# ---------------- 初始状态 ----------------
+# 上块整体向下落 + 横向滑移，砸向固定的下块：碰撞时 barrier 激活，
+# 横向相对运动激发摩擦。
+n_bottom = num_vertices // 2   # 下块顶点数（两块等大）
+velocity_np = np.zeros((num_vertices, 3), dtype=np.float64)
+velocity_np[n_bottom:, 0] = 1.0    # 横向滑移 → 摩擦
+velocity_np[n_bottom:, 2] = -1.0   # 向下落（dt*v=0.01 < 间隙 0.03，x_hat 不穿透）→ barrier
 
-    '''冻结上一时间步的位置，作为摩擦的滞后构型 x_hat'''
-    # Newton 迭代会不断改写 positions，必须留一份不动的副本给 delta = x - x_hat 用
+positions_np = verts_np.astype(np.float64).copy()
+
+# =====================================================================
+# 时间步循环
+# =====================================================================
+for step in range(NUM_STEPS):
+    print(f"\n===== step {step} =====")
+
+    x_prev = positions_np.copy()
+    v_prev = velocity_np.copy()
+
+    '''惯性预测位置 x_hat = x^n + dt*v^n + dt^2 * M^-1 * f_ext'''
+    f_ext = masses_np[:, None] * GRAVITY
+    x_hat = x_prev + DT * v_prev + (DT * DT) * (f_ext / masses_np[:, None])
+    # 固定顶点永远留在原位
+    x_hat = np.where(free2d, x_hat, verts_np)
+
+    '''冻结上一时间步位置 x^n，作为摩擦的滞后构型'''
     wp.copy(positions_prev, positions)
 
-    '''计算摩擦滞后数据: beta/alpha、切向基、法向力 N'''
-    # 内层 Newton 期间全部冻结，所以放在内层循环外面
-    lagged_data=energy.compute_friction_lagged_data(
+    '''计算摩擦滞后数据（beta/alpha、切向基、法向力 N），Newton 期间冻结'''
+    lagged_data = energy.compute_friction_lagged_data(
         positions_lagged=positions_prev,
         PT_pair=PT_pair,
         EE_pair=EE_pair,
@@ -151,141 +165,29 @@ for step in range(100):
         kappa=kappa,
     )
 
-    for iteration in range(100):
-        tape.reset()
+    solver.set_step(x_hat, positions_prev, lagged_data)
 
-        # reduce_energy 用的是 atomic_add，不清零会跨迭代一直累加
-        elastic_total.zero_()
-        PT_total.zero_()
-        EE_total.zero_()
-        friction_total.zero_()
-        total_energy.zero_()
+    '''Newton 求解：梯度 -> FD Hessian -> CCD -> Armijo -> 更新 -> 收敛判断'''
+    x_new, info = solver.solve_step(
+        x_hat,
+        max_iter=MAX_NEWTON_ITER,
+        tol_g=TOL_G,
+        tol_x=TOL_X,
+        verbose=True,
+    )
 
-        with tape:
+    '''速度更新：v^{n+1} = (x^{n+1} - x^n) / dt，固定点速度清零'''
+    velocity_np = np.where(free2d, (x_new - x_prev) / DT, 0.0)
+    positions_np = x_new
+    wp.copy(positions, wp.from_numpy(x_new.astype(np.float32), dtype=wp.vec3, device=device))
 
-            '''计算弹性能'''
-            wp.launch(
-                kernel=energy.compute_spatial_data,
-                dim=num_tets,
-                inputs=[
-                    tet_indices,
-                    positions,
-                    Dm_inv,
-                    rest_volumes,
-                    mu,
-                    lamda,
-                ],
-                outputs=[
-                    Ds,
-                    F,
-                    tet_energies,
-                ],
-                device=device,
-            )
-
-            '''计算 Barrier'''
-            energy.compute_barrier_energies(
-                positions,
-                PT_pair,
-                EE_pair,
-                d_tilde,
-                kappa,
-                PT_barrier_energies,
-                EE_barrier_energies
-            )
-
-            '''计算摩擦能'''
-            energy.compute_friction_energies(
-                positions,
-                positions_prev,
-                PT_pair,
-                EE_pair,
-                lagged_data,
-                friction_mu,
-                y_eps,
-                PT_friction_energies,
-                EE_friction_energies,
-            )
-
-            '''合并能量'''
-            wp.launch(
-                kernel=energy.reduce_energy,
-                dim=num_tets,
-                inputs=[
-                    tet_energies,
-                ],
-                outputs=[
-                    elastic_total,
-                ],
-                device=device,
-            )
-
-            if PT_pair.shape[0] > 0:
-                wp.launch(
-                    kernel=energy.reduce_energy,
-                    dim=PT_pair.shape[0],
-                    inputs=[
-                        PT_barrier_energies,
-                    ],
-                    outputs=[
-                        PT_total,
-                    ],
-                    device=device,
-                )
-
-                # PT 和 EE 的摩擦能归约到同一个 friction_total
-                wp.launch(
-                    kernel=energy.reduce_energy,
-                    dim=PT_pair.shape[0],
-                    inputs=[
-                        PT_friction_energies,
-                    ],
-                    outputs=[
-                        friction_total,
-                    ],
-                    device=device,
-                )
-
-            if EE_pair.shape[0] > 0:
-                wp.launch(
-                    kernel=energy.reduce_energy,
-                    dim=EE_pair.shape[0],
-                    inputs=[
-                        EE_barrier_energies,
-                    ],
-                    outputs=[
-                        EE_total,
-                    ],
-                    device=device,
-                )
-
-                wp.launch(
-                    kernel=energy.reduce_energy,
-                    dim=EE_pair.shape[0],
-                    inputs=[
-                        EE_friction_energies,
-                    ],
-                    outputs=[
-                        friction_total,
-                    ],
-                    device=device,
-                )
-
-            wp.launch(
-                kernel=energy.combine_energy,
-                dim=1,
-                inputs=[
-                    elastic_total,
-                    PT_total,
-                    EE_total,
-                    friction_total,
-                ],
-                outputs=[
-                    total_energy,
-                ],
-                device=device,
-            )
-
-        tape.backward(loss=total_energy)
-
-        gradient_np = positions.grad.numpy()
+    print(
+        f"[step {step} 结果] 迭代={info['iterations']} 收敛={info['converged']} "
+        f"E: {info['E0']:.6e} -> {info['Efinal']:.6e}, "
+        f"|g_free|: {info['grad_norm0']:.3e} -> {info['grad_norm1']:.3e}"
+    )
+    print(f"          最大位移 = {np.max(np.abs(positions_np - verts_np)):.4e}")
+    # 最近接触距离（确认 barrier 是否进入激活区 d < d_tilde）
+    pt_d2, ee_d2 = solver._pair_distances(positions_np)
+    d_min = (np.concatenate([pt_d2, ee_d2]).min() ** 0.5) if pt_d2.size + ee_d2.size else 0.0
+    print(f"          最近接触距离 d_min = {d_min:.6e} (barrier 激活阈值 d_tilde={d_tilde:.1e})")

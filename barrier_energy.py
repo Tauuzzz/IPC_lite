@@ -13,6 +13,12 @@ def barrier_energy(
     energy = 0.0
 
     if distance_squared < d_tilde_squared:
+        # 安全钳：特征恰好重合（顶点落在面/边上）时 d^2 可能精确为 0，
+        # log(0) 会让能量发散且梯度变 nan。钳到极小正值，力是有限大但
+        # 巨大，Newton 能正常把物体推出重叠区。正常接触路径 d 只会
+        # 停在 d_tilde ~ 1e-3，永远不会到这量级，纯属保险。
+        if distance_squared <= 1.0e-12:
+            distance_squared = 1.0e-12
         difference = distance_squared - d_tilde_squared
         distance_ratio = distance_squared / d_tilde_squared
         energy = (
