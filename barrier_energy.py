@@ -25,6 +25,37 @@ def barrier_energy(
     return energy
 
 
+@wp.func
+def barrier_force_magnitude(
+    distance_squared: float,
+    d_tilde: float,
+    kappa: float,
+) -> float:
+    # 法向接触力大小 N = -db/dd，也就是摩擦公式里的 lambda
+    # 非激活 (d >= d_tilde) 时返回 0，摩擦能随之自动为 0
+    d_tilde_squared = d_tilde * d_tilde
+
+    if distance_squared >= d_tilde_squared:
+        return 0.0
+
+    # d = 0 说明已经穿透，交给 CCD 去避免，这里只做保护
+    if distance_squared <= 1.0e-24:
+        return 0.0
+
+    difference = distance_squared - d_tilde_squared
+    ratio = distance_squared / d_tilde_squared
+
+    # b(u) = -kappa * (u - u_tilde)^2 * log(u / u_tilde)，u = d^2
+    # db/du = -kappa * [ 2(u - u_tilde) * log(u/u_tilde) + (u - u_tilde)^2 / u ]
+    db_du = -kappa * (
+        2.0 * difference * wp.log(ratio)
+        + difference * difference / distance_squared
+    )
+
+    # N = -db/dd = -db/du * du/dd = -db/du * 2d
+    return -db_du * 2.0 * wp.sqrt(distance_squared)
+
+
 @wp.kernel
 def compute_PT_barrier_energy_kernel(
     positions: wp.array[wp.vec3],

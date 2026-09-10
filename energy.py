@@ -7,6 +7,12 @@ from barrier_energy import (
     compute_EE_barrier_energy_kernel,
     compute_barrier_energies,
 )
+from friction_energy import (
+    friction_f0,
+    FrictionLaggedData,
+    compute_friction_lagged_data,
+    compute_friction_energies,
+)
 
 
 @wp.kernel
@@ -23,6 +29,12 @@ def combine_energy(
     elastic_total: wp.array[float],
     PT_total: wp.array[float],
     EE_total: wp.array[float],
+    friction_total: wp.array[float],
     total_energy: wp.array[float],
 ):
-    total_energy[0] = elastic_total[0] + PT_total[0] + EE_total[0]
+    total_energy[0] = (
+        elastic_total[0]
+        + PT_total[0]
+        + EE_total[0]
+        + friction_total[0]
+    )

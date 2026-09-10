@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import warp as wp
 import numpy as np
 
@@ -257,6 +259,126 @@ def compute_edge_to_edge_distance_squared(
     d3 = compute_point_to_segment_distance_squared(C, A, B)
     d4 = compute_point_to_segment_distance_squared(D, A, B)
     return wp.min(wp.min(d1, d2), wp.min(d3, d4))
+
+
+@wp.func
+def point_triangle_closest_point(
+    point: wp.vec3,
+    A: wp.vec3,
+    B: wp.vec3,
+    C: wp.vec3,
+) -> wp.vec2:
+    # 点到三角形平面的最近点重心坐标 (beta1, beta2)
+    # 最近点 = A + beta1 * (B - A) + beta2 * (C - A)
+    # 这里不做 clamp：投影落在三角形外时也直接返回，和 IPC toolkit 一致
+    e0 = B - A
+    e1 = C - A
+    AP = point - A
+
+    a00 = wp.dot(e0, e0)
+    a01 = wp.dot(e0, e1)
+    a11 = wp.dot(e1, e1)
+
+    b0 = wp.dot(e0, AP)
+    b1 = wp.dot(e1, AP)
+
+    det = a00 * a11 - a01 * a01
+
+    # 三角形退化
+    if wp.abs(det) <= 1.0e-12:
+        return wp.vec2(0.0, 0.0)
+
+    beta1 = (a11 * b0 - a01 * b1) / det
+    beta2 = (a00 * b1 - a01 * b0) / det
+    return wp.vec2(beta1, beta2)
+
+
+@wp.func
+def edge_edge_closest_point(
+    A: wp.vec3,
+    B: wp.vec3,
+    C: wp.vec3,
+    D: wp.vec3,
+) -> wp.vec2:
+    # 两条边最近点的参数 (alpha1, alpha2)
+    # 最近点分别是 A + alpha1 * (B - A) 和 C + alpha2 * (D - C)
+    # 和 compute_edge_to_edge_distance_squared 里的 s、t 是同一组量
+    ea = B - A
+    eb = D - C
+    w = A - C
+
+    a = wp.dot(ea, ea)
+    b = wp.dot(ea, eb)
+    c = wp.dot(eb, eb)
+    d = wp.dot(ea, w)
+    e = wp.dot(eb, w)
+
+    det = a * c - b * b
+
+    # 两条边平行或退化
+    if wp.abs(det) <= 1.0e-12:
+        return wp.vec2(0.0, 0.0)
+
+    alpha1 = (b * e - c * d) / det
+    alpha2 = (a * e - b * d) / det
+    return wp.vec2(alpha1, alpha2)
+
+
+@wp.func
+def point_triangle_tangent_basis(
+    A: wp.vec3,
+    B: wp.vec3,
+    C: wp.vec3,
+) -> Tuple[wp.vec3, wp.vec3]:
+    # 三角形所在平面的正交单位切向基 (t0, t1)
+    # t0 沿第一条边，t1 在平面内且垂直于 t0
+    e0 = B - A
+    e0_length_squared = wp.dot(e0, e0)
+
+    # 三角形退化，定义不出切平面
+    if e0_length_squared <= 1.0e-24:
+        return wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0)
+
+    t0 = e0 / wp.sqrt(e0_length_squared)
+
+    normal = wp.cross(e0, C - A)
+    t1_raw = wp.cross(normal, e0)
+    t1_length_squared = wp.dot(t1_raw, t1_raw)
+
+    # C 落在 AB 上，三角形退化为线段，只剩一个切方向
+    if t1_length_squared <= 1.0e-24:
+        return t0, wp.vec3(0.0, 0.0, 0.0)
+
+    return t0, t1_raw / wp.sqrt(t1_length_squared)
+
+
+@wp.func
+def edge_edge_tangent_basis(
+    A: wp.vec3,
+    B: wp.vec3,
+    C: wp.vec3,
+    D: wp.vec3,
+) -> Tuple[wp.vec3, wp.vec3]:
+    # 两条边张成的平面的正交单位切向基 (t0, t1)
+    ea = B - A
+    eb = D - C
+    ea_length_squared = wp.dot(ea, ea)
+
+    if ea_length_squared <= 1.0e-24:
+        return wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0)
+
+    t0 = ea / wp.sqrt(ea_length_squared)
+
+    # 接触法向 n = ea x eb
+    normal = wp.cross(ea, eb)
+    t1_raw = wp.cross(normal, ea)
+    t1_length_squared = wp.dot(t1_raw, t1_raw)
+
+    # 两边平行时 normal = 0，滑动只可能沿边方向，t1 置零即可
+    if t1_length_squared <= 1.0e-24:
+        return t0, wp.vec3(0.0, 0.0, 0.0)
+
+    return t0, t1_raw / wp.sqrt(t1_length_squared)
 
 
 @wp.kernel

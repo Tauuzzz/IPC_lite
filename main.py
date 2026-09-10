@@ -19,8 +19,12 @@ lamda=E*NIU/((1+NIU)*(1-2*NIU))
 
 # 参考位置
 rest_positions=wp.empty(num_vertices, dtype=wp.vec3, device=device)
+
+velocity=wp.empty(num_vertices, dtype=wp.vec3, device=device)
 # 当前位置
 positions=wp.empty(num_vertices, dtype=wp.vec3, device=device, requires_grad=True)
+# 滞后位置（上一时间步的 x_hat），摩擦几何全部在这个构型上算好后冻结
+positions_prev=wp.empty(num_vertices, dtype=wp.vec3, device=device)
 # 四面体的顶点索引序号
 tet_indices=wp.empty(num_tets, dtype=wp.vec4i, device=device)
 # 四面体参考体积
@@ -43,6 +47,17 @@ all_faces=wp.empty(num_tets*4, dtype=wp.vec3i, device=device)
 # Barrier constant
 d_tilde=1e-3
 kappa = 1e5
+
+# 时间步长
+DT = 0.01
+
+# Friction constant
+# 摩擦系数
+friction_mu = 0.3
+# 摩擦光滑化的速度阈值
+eps_v = 1e-3
+# 位移阈值，f0 的分段点
+y_eps = DT * eps_v
 
 wp.launch(
     kernel=geometry.extract_all_faces,
@@ -71,13 +86,33 @@ EE_barrier_energies=wp.empty(
     requires_grad=True,
 )
 
-# 三类能量分别归约为标量，最后再合并为总能量
+PT_friction_energies=wp.empty(
+    PT_pair.shape[0],
+    dtype=float,
+    device=device,
+    requires_grad=True,
+)
+EE_friction_energies=wp.empty(
+    EE_pair.shape[0],
+    dtype=float,
+    device=device,
+    requires_grad=True,
+)
+
+# 四类能量分别归约为标量，最后再合并为总能量
 elastic_total=wp.zeros(1, dtype=float, device=device, requires_grad=True)
 PT_total=wp.zeros(1, dtype=float, device=device, requires_grad=True)
 EE_total=wp.zeros(1, dtype=float, device=device, requires_grad=True)
+# PT 和 EE 的摩擦能都归约到同一个标量，reduce_energy 用的是 atomic_add
+friction_total=wp.zeros(1, dtype=float, device=device, requires_grad=True)
 total_energy=wp.zeros(1, dtype=float, device=device, requires_grad=True)
 tape=wp.Tape()
 
+'''
+START
+'''
+
+# 计算参考位置的边矩阵
 wp.launch(
     kernel=energy.compute_rest_data,
     dim=num_tets,
@@ -93,93 +128,164 @@ wp.launch(
     device=device,
 )
 
-with tape:
+for step in range(100):
 
+    '''上一步的速度和位置'''
+    position_prev = positions.numpy().copy()
+    velocity_prev = velocity.numpy().copy()
 
-    '''计算弹性能'''
-    wp.launch(
-        kernel=energy.compute_spatial_data,
-        dim=num_tets,
-        inputs=[
-            tet_indices,
-            positions,
-            Dm_inv,
-            rest_volumes,
-            mu,
-            lamda,
-        ],
-        outputs=[
-            Ds,
-            F,
-            tet_energies,
-        ],
-        device=device,
+    '''惯性预测位置，作为迭代起点'''
+    position_hat = position_prev + velocity_prev * DT
+
+    '''冻结上一时间步的位置，作为摩擦的滞后构型 x_hat'''
+    # Newton 迭代会不断改写 positions，必须留一份不动的副本给 delta = x - x_hat 用
+    wp.copy(positions_prev, positions)
+
+    '''计算摩擦滞后数据: beta/alpha、切向基、法向力 N'''
+    # 内层 Newton 期间全部冻结，所以放在内层循环外面
+    lagged_data=energy.compute_friction_lagged_data(
+        positions_lagged=positions_prev,
+        PT_pair=PT_pair,
+        EE_pair=EE_pair,
+        d_tilde=d_tilde,
+        kappa=kappa,
     )
 
-    '''计算 Barrier'''
-    energy.compute_barrier_energies(
-        positions,
-        PT_pair,
-        EE_pair,
-        d_tilde,
-        kappa,
-        PT_barrier_energies,
-        EE_barrier_energies
-    )
+    for iteration in range(100):
+        tape.reset()
 
-    '''合并能量'''
-    wp.launch(
-        kernel=energy.reduce_energy,
-        dim=num_tets,
-        inputs=[
-            tet_energies,
-        ],
-        outputs=[
-            elastic_total,
-        ],
-        device=device,
-    )
+        # reduce_energy 用的是 atomic_add，不清零会跨迭代一直累加
+        elastic_total.zero_()
+        PT_total.zero_()
+        EE_total.zero_()
+        friction_total.zero_()
+        total_energy.zero_()
 
-    if PT_pair.shape[0] > 0:
-        wp.launch(
-            kernel=energy.reduce_energy,
-            dim=PT_pair.shape[0],
-            inputs=[
+        with tape:
+
+            '''计算弹性能'''
+            wp.launch(
+                kernel=energy.compute_spatial_data,
+                dim=num_tets,
+                inputs=[
+                    tet_indices,
+                    positions,
+                    Dm_inv,
+                    rest_volumes,
+                    mu,
+                    lamda,
+                ],
+                outputs=[
+                    Ds,
+                    F,
+                    tet_energies,
+                ],
+                device=device,
+            )
+
+            '''计算 Barrier'''
+            energy.compute_barrier_energies(
+                positions,
+                PT_pair,
+                EE_pair,
+                d_tilde,
+                kappa,
                 PT_barrier_energies,
-            ],
-            outputs=[
-                PT_total,
-            ],
-            device=device,
-        )
+                EE_barrier_energies
+            )
 
-    if EE_pair.shape[0] > 0:
-        wp.launch(
-            kernel=energy.reduce_energy,
-            dim=EE_pair.shape[0],
-            inputs=[
-                EE_barrier_energies,
-            ],
-            outputs=[
-                EE_total,
-            ],
-            device=device,
-        )
+            '''计算摩擦能'''
+            energy.compute_friction_energies(
+                positions,
+                positions_prev,
+                PT_pair,
+                EE_pair,
+                lagged_data,
+                friction_mu,
+                y_eps,
+                PT_friction_energies,
+                EE_friction_energies,
+            )
 
-    wp.launch(
-        kernel=energy.combine_energy,
-        dim=1,  
-        inputs=[
-            elastic_total,
-            PT_total,
-            EE_total,
-        ],
-        outputs=[
-            total_energy,
-        ],
-        device=device,
-    )
+            '''合并能量'''
+            wp.launch(
+                kernel=energy.reduce_energy,
+                dim=num_tets,
+                inputs=[
+                    tet_energies,
+                ],
+                outputs=[
+                    elastic_total,
+                ],
+                device=device,
+            )
 
-tape.backward(loss=total_energy)
+            if PT_pair.shape[0] > 0:
+                wp.launch(
+                    kernel=energy.reduce_energy,
+                    dim=PT_pair.shape[0],
+                    inputs=[
+                        PT_barrier_energies,
+                    ],
+                    outputs=[
+                        PT_total,
+                    ],
+                    device=device,
+                )
 
-gradient_np = positions.grad.numpy()
+                # PT 和 EE 的摩擦能归约到同一个 friction_total
+                wp.launch(
+                    kernel=energy.reduce_energy,
+                    dim=PT_pair.shape[0],
+                    inputs=[
+                        PT_friction_energies,
+                    ],
+                    outputs=[
+                        friction_total,
+                    ],
+                    device=device,
+                )
+
+            if EE_pair.shape[0] > 0:
+                wp.launch(
+                    kernel=energy.reduce_energy,
+                    dim=EE_pair.shape[0],
+                    inputs=[
+                        EE_barrier_energies,
+                    ],
+                    outputs=[
+                        EE_total,
+                    ],
+                    device=device,
+                )
+
+                wp.launch(
+                    kernel=energy.reduce_energy,
+                    dim=EE_pair.shape[0],
+                    inputs=[
+                        EE_friction_energies,
+                    ],
+                    outputs=[
+                        friction_total,
+                    ],
+                    device=device,
+                )
+
+            wp.launch(
+                kernel=energy.combine_energy,
+                dim=1,
+                inputs=[
+                    elastic_total,
+                    PT_total,
+                    EE_total,
+                    friction_total,
+                ],
+                outputs=[
+                    total_energy,
+                ],
+                device=device,
+            )
+
+        tape.backward(loss=total_energy)
+
+        gradient_np = positions.grad.numpy()

@@ -169,6 +169,8 @@ def main():
     elastic_total = wp.zeros(1, dtype=float, device=device, requires_grad=True)
     PT_total = wp.zeros(1, dtype=float, device=device, requires_grad=True)
     EE_total = wp.zeros(1, dtype=float, device=device, requires_grad=True)
+    # 这个示例不含摩擦，占位一个全零项以匹配 combine_energy 的签名
+    friction_total = wp.zeros(1, dtype=float, device=device, requires_grad=True)
     total_energy = wp.zeros(1, dtype=float, device=device, requires_grad=True)
 
     tape = wp.Tape()
@@ -227,7 +229,7 @@ def main():
         wp.launch(
             kernel=energy.combine_energy,
             dim=1,
-            inputs=[elastic_total, PT_total, EE_total],
+            inputs=[elastic_total, PT_total, EE_total, friction_total],
             outputs=[total_energy],
             device=device,
         )
