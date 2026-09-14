@@ -26,8 +26,16 @@ python main.py
 ```bash
 python example_strain_energy.py      # 应变能：单个四面体的 F / 能量
 python example_energy_gradient.py    # barrier + 摩擦能：两个四面体的接触
-python example_barrier_friction.py   # barrier / 摩擦能曲线可视化（生成 png 图）
 ```
+
+两个**可交互 notebook**（公式逐式拆解 + 滑块调参，需要 `pip install ipywidgets jupyter`）：
+
+- `notebooks/barrier.ipynb` — Barrier 接触能：公式推导、d² 变量替换的原因、
+  κ/d̂ 取舍的交互滑块、d→0 钳位保险丝、固定候选集的代价
+- `notebooks/friction.ipynb` — 摩擦能：f0 光滑化（含 C1 接续条件验证）、
+  滑动位移算子 Γ、λ 滞后冻结的取舍、交互滑块看 μ/λ 如何控制摩擦
+
+notebook 里的公式全部用 numpy 复算，并和 warp kernel 做了数值一致性交叉验证。
 
 ## 代码地图（建议阅读顺序）
 
@@ -42,7 +50,8 @@ python example_barrier_friction.py   # barrier / 摩擦能曲线可视化（生�
 | `newton_solver.py` | Newton 方向、FD Hessian、CCD、Armijo 线搜索 | 隐式时间积分求解器 |
 | `main.py` | 主流程：初始化 + 时间步循环（带伪代码注释） | 算法总装 |
 | `INDEX.md` | **变量对照表**：每个变量在哪定义、什么形状、什么含义 | — |
-| `example_barrier_friction.py` | barrier/摩擦曲线可视化 + 取舍说明 | — |
+| `notebooks/barrier.ipynb` | barrier 公式交互拆解（滑块调 κ/d̂） | — |
+| `notebooks/friction.ipynb` | 摩擦公式交互拆解（滑块调 μ/λ） | — |
 
 `main.py` 顶部的 docstring 就是用中文重写的 IPC 算法伪代码，
 代码中每个关键位置都标注了对应的伪代码编号（step 级 1~5、迭代内 1~11）。
@@ -61,10 +70,8 @@ Newton 迭代:  H·p = −g → CCD 限制步长防穿透 → Armijo 线搜索 �
 
 ## Barrier 与摩擦：公式、取舍与近似
 
-> 运行 `python example_barrier_friction.py` 会用 numpy 复算下面所有公式并画出曲线
-> （`barrier_friction_curves.png`），并与 warp kernel 的实现做了数值一致性交叉验证。
-
-![barrier 与摩擦曲线](barrier_friction_curves.png)
+> 公式推导和交互图表见 [notebooks/barrier.ipynb](notebooks/barrier.ipynb) 和
+> [notebooks/friction.ipynb](notebooks/friction.ipynb)，本节是文字版速览。
 
 ### Barrier 接触能：用"对数墙"代替"不可穿透约束"
 
@@ -121,7 +128,9 @@ f0(s) = s²/y_eps − s³/(3·y_eps²) + y_eps/3,   s < y_eps   （静摩擦区�
 
 ### 一图流总结
 
-| 现象 | 曲线表现（见 png） |
+（曲线图见两个 notebook，已含 warp kernel 一致性验证）
+
+| 现象 | 曲线表现 |
 |---|---|
 | 接触是"软墙"不是硬约束 | b(d) 在 d̂ 处平滑接入 0，d→0 时 log 陡增 |
 | 力在激活瞬间连续、随后增大 | N(d) 从 d̂ 处 0 开始增长，越近越大 |
