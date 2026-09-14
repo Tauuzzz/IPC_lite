@@ -26,6 +26,7 @@ python main.py
 ```bash
 python example_strain_energy.py      # 应变能：单个四面体的 F / 能量
 python example_energy_gradient.py    # barrier + 摩擦能：两个四面体的接触
+python example_barrier_friction.py   # barrier / 摩擦能曲线可视化（生成 png 图）
 ```
 
 ## 代码地图（建议阅读顺序）
@@ -41,6 +42,7 @@ python example_energy_gradient.py    # barrier + 摩擦能：两个四面体的�
 | `newton_solver.py` | Newton 方向、FD Hessian、CCD、Armijo 线搜索 | 隐式时间积分求解器 |
 | `main.py` | 主流程：初始化 + 时间步循环（带伪代码注释） | 算法总装 |
 | `INDEX.md` | **变量对照表**：每个变量在哪定义、什么形状、什么含义 | — |
+| `example_barrier_friction.py` | barrier/摩擦曲线可视化 + 取舍说明 | — |
 
 `main.py` 顶部的 docstring 就是用中文重写的 IPC 算法伪代码，
 代码中每个关键位置都标注了对应的伪代码编号（step 级 1~5、迭代内 1~11）。
@@ -56,6 +58,77 @@ python example_energy_gradient.py    # barrier + 摩擦能：两个四面体的�
 
 Newton 迭代:  H·p = −g → CCD 限制步长防穿透 → Armijo 线搜索 → 更新 x
 ```
+
+## Barrier 与摩擦：公式、取舍与近似
+
+> 运行 `python example_barrier_friction.py` 会用 numpy 复算下面所有公式并画出曲线
+> （`barrier_friction_curves.png`），并与 warp kernel 的实现做了数值一致性交叉验证。
+
+![barrier 与摩擦曲线](barrier_friction_curves.png)
+
+### Barrier 接触能：用"对数墙"代替"不可穿透约束"
+
+接触在数学上是一个不等式约束 `d(x) ≥ 0`。精确处理要用约束求解器（LCP 等），
+IPC 的取舍是**把约束变成能量**：距离越近能量越高，物体被"软墙"顶住。
+
+论文原式（以距离 d 为变量）：
+
+```
+b(d) = −κ·(d − d̂)²·ln(d / d̂),   d < d̂
+b(d) = 0,                        d ≥ d̂
+```
+
+对应的代码在 `barrier_energy.py`。本实现的取舍：
+
+| 论文/真实 IPC | 本实现 | 为什么可以 |
+|---|---|---|
+| 对每对几何体精确算最近点距离 | PT/EE 距离 kernel，退化情形（三角形压扁、边共线）逐一特判 | 教学网格简单，退化处理写成显式分支更易读（`geometry.py`） |
+| d → 0 时能量发散到 +∞，天然不穿透 | `d² ≤ 1e-12` 时钳到 `1e-12`（`barrier_energy.py:20`） | 纯保险丝：正常解里 d 停在 d̂ 量级；真穿透交给 CCD 拦截 |
+| 每 step 用 broad-phase 重建候选集 | 初始化一次枚举全部 PT/EE 对，之后固定 | 网格小，固定候选集代码量减半；代价见"教学简化" |
+| κ 自适应（barrier 与弹性能量量纲匹配） | 固定 `kappa = 1e5` | 固定值让"调 κ 看穿透/抖动"成为练习题 |
+
+**注意 barrier 的变量是 d² 还是 d**：本实现与 IPC toolkit 一致，把公式写在
+`u = d²` 上（`b(u) = −κ(u − d̂²)²·ln(u/d̂²)`），这样省掉每次开根号，
+自动微分也不用处理 `sqrt` 在 0 点的无穷导数。
+
+### 摩擦能：把"不滑动"变成"滑得越远越贵"
+
+库仑摩擦是"切向力 ≤ μ·λ"的不等式，同样不方便放进能量极小化框架。
+IPC 的做法是给切向滑动位移 y 定义一个耗散势能：
+
+```
+D(y) = μ·λ·f0(‖y‖)
+f0(s) = s,                            s ≥ y_eps   （纯滑动区）
+f0(s) = s²/y_eps − s³/(3·y_eps²) + y_eps/3,   s < y_eps   （静摩擦区）
+```
+
+四个关键近似（代码在 `friction_energy.py`）：
+
+1. **λ 用滞后构型冻结（lagged/friction anchoring）**。
+   法向力 λ = N(d) 本应是当前构型 x 的函数，那样目标函数会强烈非线性、Newton 难收敛。
+   本实现在每个时间步开头，在上一步解 xⁿ 上把 λ、接触点参数（β/α）、切平面基
+   （tangent0/1）全部算好冻结，整个 Newton 期间只读（`main.py` step 级 3）。
+   代价：摩擦力对当前步的法向变化"晚一步"响应——这是 IPC 论文的标准做法。
+2. **|y| 的 C1 光滑化**。原始 |y| 在 0 处有尖角（不可导），Newton 法需要至少一阶导连续。
+   三次多项式段把尖角抹平，两段在 `y_eps` 处函数值和导数都相等（f0(y_eps)=y_eps,
+   f0′(y_eps)=1），所以"静摩擦 → 滑动"过渡是平滑的。`y_eps = DT·eps_v` 把速度阈值
+   换算成位移阈值。
+3. **切平面投影**。相对位移只取切向分量（沿接触面），法向分量归 barrier 管，
+   两套能量各司其职、互不重复计费。
+4. **滑动位移算子 Γ**。接触点不一定在顶点上（点可能落在三角形内部/边上），
+   相对位移用重心坐标（β 或 α）把四个顶点的位移混合出来——
+   这就是 lagged 数据里存 β/α 的原因。
+
+### 一图流总结
+
+| 现象 | 曲线表现（见 png） |
+|---|---|
+| 接触是"软墙"不是硬约束 | b(d) 在 d̂ 处平滑接入 0，d→0 时 log 陡增 |
+| 力在激活瞬间连续、随后增大 | N(d) 从 d̂ 处 0 开始增长，越近越大 |
+| 钳位保险丝的位置 | d < 1e-6 处曲线被截断（正常解到不了） |
+| 静摩擦区 | f0 在 |y| < y_eps 内是抛物线，之外是直线 |
+| 压得越紧越难滑 | λ 越大 D(y) 越陡 |
+
 
 ## 教学简化（与真实 IPC 的差距）
 
