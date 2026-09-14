@@ -5,16 +5,16 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# 规则四面体网格生成（学习用 demo 网格）
+# 规则四面体网格生成(学习用 demo 网格)
 # ---------------------------------------------------------------------------
 
 def build_regular_tet_grid(nc: int, size: float = 0.2):
-    """生成 nc x nc x nc 个 cell 的规则四面体网格（每个 cube 拆 6 个 tet）。
+    """生成 nc x nc x nc 个 cell 的规则四面体网格(每个 cube 拆 6 个 tet).
 
     Returns:
-        verts_np: ((nc+1)^3, 3) float32 顶点坐标，按 (i, j, k) 顺序
+        verts_np: ((nc+1)^3, 3) float32 顶点坐标,按 (i, j, k) 顺序
         tets_np:  (6*nc^3, 4) int32 tet 顶点索引
-        pinned_np: ((nc+1)^3,) bool，z=0 层固定
+        pinned_np: ((nc+1)^3,) bool,z=0 层固定
     """
     nv = nc + 1
     h = size / nc
@@ -26,8 +26,8 @@ def build_regular_tet_grid(nc: int, size: float = 0.2):
             for i in range(nv):
                 verts[i + j * nv + k * nv * nv] = (i * h, j * h, k * h)
 
-    # 每个 cell 拆成 6 个 tet：绕主对角线 (a, a2, b2, d2) 的 6 个非退化 tet。
-    # 局部角点编号：0=a 1=b 2=c 3=d 4=a2 5=b2 6=c2 7=d2
+    # 每个 cell 拆成 6 个 tet:绕主对角线 (a, a2, b2, d2) 的 6 个非退化 tet.
+    # 局部角点编号:0=a 1=b 2=c 3=d 4=a2 5=b2 6=c2 7=d2
     #   a=(0,0,0) b=(1,0,0) c=(0,1,0) d=(1,1,0)
     #   a2=(0,0,1) b2=(1,0,1) c2=(0,1,1) d2=(1,1,1)
     tets = []
@@ -60,18 +60,18 @@ def build_regular_tet_grid(nc: int, size: float = 0.2):
 
 
 def build_two_cubes(nc: int = 2, size: float = 0.2, gap: float = 0.03, lateral: float = 0.02):
-    """上下两块相隔 gap 的立方体：底部固定，顶部带横向偏移。
+    """上下两块相隔 gap 的立方体:底部固定,顶部带横向偏移.
 
-    跨物体的 PT/EE 对是正常对（初始距离 = gap > 0），不会被候选过滤删掉，
-    互相靠近到 d < d_tilde 时 barrier 激活；顶部横向滑移激发摩擦。
+    跨物体的 PT/EE 对是正常对(初始距离 = gap > 0),不会被候选过滤删掉,
+    互相靠近到 d < d_tilde 时 barrier 激活;顶部横向滑移激发摩擦.
 
     Returns:
-        verts_np, tets_np, pinned_np（同 build_regular_tet_grid）
+        verts_np, tets_np, pinned_np(同 build_regular_tet_grid)
     """
     verts0, tets0, pinned0 = build_regular_tet_grid(nc, size)
     verts1, tets1, _ = build_regular_tet_grid(nc, size)
 
-    # 上块：抬高 size+gap，x 方向横移 lateral
+    # 上块:抬高 size+gap,x 方向横移 lateral
     verts1 = verts1.astype(np.float64)
     verts1[:, 0] += lateral
     verts1[:, 2] += size + gap
@@ -90,17 +90,17 @@ def filter_degenerate_candidates(
     threshold_sq: float = 1e-12,
     device: str = "cpu",
 ):
-    """去掉初始构型上距离严格为 0 的 PT/EE 候选对。
+    """去掉初始构型上距离严格为 0 的 PT/EE 候选对.
 
-    固定候选集合的设计里，同一表面相邻（共面、共享边）的三角形之间
-    会出现"顶点 vs 相邻面"距离 = 0 的退化对（例如正方形沿对角线剖成
-    两个三角形，对角的顶点投影落在共享对角线上）。barrier 在 d=0 处
-    发散，必须把这些对提前剔除。真实 IPC 每 step 重建候选集合，
-    用 broad-phase + 距离阈值就天然不会产生这种对。
+    固定候选集合的设计里,同一表面相邻(共面,共享边)的三角形之间
+    会出现"顶点 vs 相邻面"距离 = 0 的退化对(例如正方形沿对角线剖成
+    两个三角形,对角的顶点投影落在共享对角线上).barrier 在 d=0 处
+    发散,必须把这些对提前剔除.真实 IPC 每 step 重建候选集合,
+    用 broad-phase + 距离阈值就天然不会产生这种对.
 
-    注意：这里只剔距离 == 0 的退化为，阈值和 barrier 的 d_tilde 无关，
-    否则会把初始距离在 d_tilde 以内的正常对（比如两个快要接触的物体）
-    也删掉，接触就永远触发不了了。
+    注意:这里只剔距离 == 0 的退化对,阈值和 barrier 的 d_tilde 无关,
+    否则会把初始距离在 d_tilde 以内的正常对(比如两个快要接触的物体)
+    也删掉,接触就永远触发不了了.
     """
     verts = wp.array(rest_positions_np.astype(np.float32), dtype=wp.vec3, device=device)
     PT_pair = make_PT_candidates(surface_faces_np, device=device)
@@ -135,7 +135,7 @@ def extract_all_faces(tet_indices: wp.array[wp.vec4i],
 
 def extract_surface_faces_and_edges(surface_faces: wp.array[wp.vec3i]):
     all_faces_np=surface_faces.numpy()
-    # 将所有面排序，以便去重
+    # 将所有面排序,以便去重
     sorted_faces_np=np.sort(all_faces_np,axis=1)
 
     unique_faces_np, counts = np.unique(
@@ -154,7 +154,7 @@ def extract_surface_faces_and_edges(surface_faces: wp.array[wp.vec3i]):
         edges.append((face[1], face[2]))
 
     surface_edges_np = np.array(edges, dtype=np.int32)
-    # 将边排序，以便去重
+    # 将边排序,以便去重
     sorted_edges_np = np.sort(surface_edges_np, axis=1)
 
     unique_edges_np = np.unique(
@@ -186,7 +186,7 @@ def make_PT_candidates(surface_faces_np, device=None):
         for face in other_faces:
             PT_candidates.append((vertex, face[0], face[1], face[2]))
 
-    # reshape保证没有候选对时，数组形状仍然是(0, 4)
+    # reshape保证没有候选对时,数组形状仍然是(0, 4)
     PT_candidates_np = np.asarray(
         PT_candidates,
         dtype=np.int32,
@@ -207,7 +207,7 @@ def make_EE_candidates(surface_edges_np, device=None):
         edge0 = surface_edges_np[i]
         for j in range(i + 1, num_edges):
             edge1 = surface_edges_np[j]
-            # 如果两个边没有公共顶点，则它们是EE候选对
+            # 如果两个边没有公共顶点,则它们是EE候选对
             has_shared_vertex = (
                 (edge0[0] == edge1[0])
                 or (edge0[0] == edge1[1])
@@ -218,7 +218,7 @@ def make_EE_candidates(surface_edges_np, device=None):
             if not has_shared_vertex:
                 EE_candidates.append((edge0[0], edge0[1], edge1[0], edge1[1]))
 
-    # reshape保证没有候选对时，数组形状仍然是(0, 4)
+    # reshape保证没有候选对时,数组形状仍然是(0, 4)
     EE_candidates_np = np.asarray(
         EE_candidates,
         dtype=np.int32,
@@ -303,7 +303,7 @@ def compute_point_to_triangle_distance_squared(
     N_length_squared = wp.dot(N, N)
 
     if N_length_squared <= 1.0e-12:
-        # 三角形退化时，取点到三条边的最小平方距离
+        # 三角形退化时,取点到三条边的最小平方距离
         d1 = compute_point_to_segment_distance_squared(point, A, B)
         d2 = compute_point_to_segment_distance_squared(point, B, C)
         d3 = compute_point_to_segment_distance_squared(point, C, A)
@@ -317,7 +317,7 @@ def compute_point_to_triangle_distance_squared(
     if is_point_in_triangle(projection, A, B, C):
         return normal_projection * normal_projection / N_length_squared
     else:
-        # 如果不在三角形内，返回点到三条边的最小平方距离
+        # 如果不在三角形内,返回点到三条边的最小平方距离
         d1 = compute_point_to_segment_distance_squared(point, A, B)
         d2 = compute_point_to_segment_distance_squared(point, B, C)
         d3 = compute_point_to_segment_distance_squared(point, C, A)
@@ -355,7 +355,7 @@ def compute_edge_to_edge_distance_squared(
 
     delta = a * c - b * b
 
-    # 非平行时，先检查无限直线的最近点是否同时位于两条边内部
+    # 非平行时,先检查无限直线的最近点是否同时位于两条边内部
     if delta > 1.0e-12 * a * c:
         s = (b * e - c * d) / delta
         t = (a * e - b * d) / delta
@@ -366,7 +366,7 @@ def compute_edge_to_edge_distance_squared(
             difference = closest_point_edge0 - closest_point_edge1
             return wp.dot(difference, difference)
 
-    # 平行或无限直线最近点越界时，最近点位于参数区域的边界
+    # 平行或无限直线最近点越界时,最近点位于参数区域的边界
     d1 = compute_point_to_segment_distance_squared(A, C, D)
     d2 = compute_point_to_segment_distance_squared(B, C, D)
     d3 = compute_point_to_segment_distance_squared(C, A, B)
@@ -383,7 +383,7 @@ def point_triangle_closest_point(
 ) -> wp.vec2:
     # 点到三角形平面的最近点重心坐标 (beta1, beta2)
     # 最近点 = A + beta1 * (B - A) + beta2 * (C - A)
-    # 这里不做 clamp：投影落在三角形外时也直接返回，和 IPC toolkit 一致
+    # 这里不做 clamp:投影落在三角形外时也直接返回,和 IPC toolkit 一致
     e0 = B - A
     e1 = C - A
     AP = point - A
@@ -415,7 +415,7 @@ def edge_edge_closest_point(
 ) -> wp.vec2:
     # 两条边最近点的参数 (alpha1, alpha2)
     # 最近点分别是 A + alpha1 * (B - A) 和 C + alpha2 * (D - C)
-    # 和 compute_edge_to_edge_distance_squared 里的 s、t 是同一组量
+    # 和 compute_edge_to_edge_distance_squared 里的 s,t 是同一组量
     ea = B - A
     eb = D - C
     w = A - C
@@ -444,11 +444,11 @@ def point_triangle_tangent_basis(
     C: wp.vec3,
 ) -> Tuple[wp.vec3, wp.vec3]:
     # 三角形所在平面的正交单位切向基 (t0, t1)
-    # t0 沿第一条边，t1 在平面内且垂直于 t0
+    # t0 沿第一条边,t1 在平面内且垂直于 t0
     e0 = B - A
     e0_length_squared = wp.dot(e0, e0)
 
-    # 三角形退化，定义不出切平面
+    # 三角形退化,定义不出切平面
     if e0_length_squared <= 1.0e-24:
         return wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0)
 
@@ -458,7 +458,7 @@ def point_triangle_tangent_basis(
     t1_raw = wp.cross(normal, e0)
     t1_length_squared = wp.dot(t1_raw, t1_raw)
 
-    # C 落在 AB 上，三角形退化为线段，只剩一个切方向
+    # C 落在 AB 上,三角形退化为线段,只剩一个切方向
     if t1_length_squared <= 1.0e-24:
         return t0, wp.vec3(0.0, 0.0, 0.0)
 
@@ -487,7 +487,7 @@ def edge_edge_tangent_basis(
     t1_raw = wp.cross(normal, ea)
     t1_length_squared = wp.dot(t1_raw, t1_raw)
 
-    # 两边平行时 normal = 0，滑动只可能沿边方向，t1 置零即可
+    # 两边平行时 normal = 0,滑动只可能沿边方向,t1 置零即可
     if t1_length_squared <= 1.0e-24:
         return t0, wp.vec3(0.0, 0.0, 0.0)
 
@@ -542,7 +542,7 @@ def compute_EE_distance_kernel(
 
 
 def compute_distance(positions, PT_pair, EE_pair, d_tilde):
-    """计算全部PT/EE候选对的平方距离和接近标记。"""
+    """计算全部PT/EE候选对的平方距离和接近标记."""
 
     if d_tilde <= 0.0:
         raise ValueError("d_tilde必须大于0")
@@ -552,7 +552,7 @@ def compute_distance(positions, PT_pair, EE_pair, d_tilde):
     device = positions.device
 
     if PT_pair.device != device or EE_pair.device != device:
-        raise ValueError("positions、PT_pair和EE_pair必须位于同一个Warp设备")
+        raise ValueError("positions,PT_pair和EE_pair必须位于同一个Warp设备")
 
     d_tilde_squared = d_tilde * d_tilde
 

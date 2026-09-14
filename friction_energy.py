@@ -8,8 +8,8 @@ from barrier_energy import barrier_force_magnitude
 
 @dataclass
 class FrictionLaggedData:
-    # 一次 Newton 求解内全部冻结的摩擦几何量，都在滞后构型 x_hat 上算好
-    # beta / alpha 决定相对位移算子 Gamma，tangent 决定切向基 T，normal_force 就是 lambda
+    # 一次 Newton 求解内全部冻结的摩擦几何量,都在滞后构型 x^n 上算好
+    # beta / alpha 决定相对位移算子 Gamma,tangent 决定切向基 T,normal_force 就是 lambda
     PT_beta: wp.array
     PT_tangent0: wp.array
     PT_tangent1: wp.array
@@ -98,9 +98,9 @@ def compute_friction_lagged_data(
     d_tilde,
     kappa,
 ):
-    """在滞后构型 x_hat 上算出摩擦需要的全部冻结量。
+    """在滞后构型 x^n 上算出摩擦需要的全部冻结量.
 
-    这个函数必须在 wp.Tape 外面调用，输出数组也都不带梯度。
+    这个函数必须在 wp.Tape 外面调用,输出数组也都不带梯度.
     """
 
     device = positions_lagged.device
@@ -173,9 +173,9 @@ def friction_f0(
     y_eps: float,
 ) -> float:
     # 库仑摩擦 |y| 的 C1 光滑化
-    # slip_norm >= y_eps：纯滑动，就是 |y| 本身
-    # slip_norm <  y_eps：三次多项式，把 |y| 在 0 处的尖角抹平（静摩擦区）
-    # 两段在 y_eps 处值和导数都接得上：f0(y_eps) = y_eps，f0'(y_eps) = 1
+    # slip_norm >= y_eps:纯滑动,就是 |y| 本身
+    # slip_norm <  y_eps:三次多项式,把 |y| 在 0 处的尖角抹平(静摩擦区)
+    # 两段在 y_eps 处值和导数都接得上:f0(y_eps) = y_eps,f0'(y_eps) = 1
     if slip_norm >= y_eps:
         return slip_norm
 
@@ -221,12 +221,12 @@ def compute_PT_friction_energy_kernel(
         - beta2 * delta_C
     )
 
-    # 投影到切平面，得到滑动位移 y；沿法线的分量被丢掉，那部分归 barrier 管
+    # 投影到切平面,得到滑动位移 y;沿法线的分量被丢掉,那部分归 barrier 管
     slip = wp.vec2(
         wp.dot(PT_tangent0[pair_index], relative_displacement),
         wp.dot(PT_tangent1[pair_index], relative_displacement),
     )
-    # 这里必须用 wp.length：slip = 0 时它的梯度是 0，
+    # 这里必须用 wp.length:slip = 0 时它的梯度是 0,
     # 而 wp.sqrt(wp.dot(slip, slip)) 的梯度是 NaN
     slip_norm = wp.length(slip)
 
@@ -269,7 +269,7 @@ def compute_EE_friction_energy_kernel(
         - (1.0 - alpha2) * delta_C
         - alpha2 * delta_D
     )
-    # 投影到切平面，得到滑动位移 y；沿法线的分量被丢掉，那部分归 barrier 管
+    # 投影到切平面,得到滑动位移 y;沿法线的分量被丢掉,那部分归 barrier 管
     slip = wp.vec2(
         wp.dot(EE_tangent0[pair_index], relative_displacement),
         wp.dot(EE_tangent1[pair_index], relative_displacement),
@@ -294,9 +294,9 @@ def compute_friction_energies(
     PT_friction_energies,
     EE_friction_energies,
 ):
-    """计算全部 PT/EE 候选对的摩擦耗散能。
+    """计算全部 PT/EE 候选对的摩擦耗散能.
 
-    必须在 wp.Tape 里面调用。lagged_data 里的量全部是冻结常量，不带梯度。
+    必须在 wp.Tape 里面调用.lagged_data 里的量全部是冻结常量,不带梯度.
     """
 
     device = positions.device

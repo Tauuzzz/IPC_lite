@@ -13,10 +13,10 @@ def barrier_energy(
     energy = 0.0
 
     if distance_squared < d_tilde_squared:
-        # 安全钳：特征恰好重合（顶点落在面/边上）时 d^2 可能精确为 0，
-        # log(0) 会让能量发散且梯度变 nan。钳到极小正值，力是有限大但
-        # 巨大，Newton 能正常把物体推出重叠区。正常接触路径 d 只会
-        # 停在 d_tilde ~ 1e-3，永远不会到这量级，纯属保险。
+        # 安全钳:特征恰好重合(顶点落在面/边上)时 d^2 可能精确为 0,
+        # log(0) 会让能量发散且梯度变 nan.钳到极小正值,力是有限大但
+        # 巨大,Newton 能正常把物体推出重叠区.正常接触路径 d 只会
+        # 停在 d_tilde ~ 1e-3,永远不会到这量级,纯属保险.
         if distance_squared <= 1.0e-12:
             distance_squared = 1.0e-12
         difference = distance_squared - d_tilde_squared
@@ -37,21 +37,21 @@ def barrier_force_magnitude(
     d_tilde: float,
     kappa: float,
 ) -> float:
-    # 法向接触力大小 N = -db/dd，也就是摩擦公式里的 lambda
-    # 非激活 (d >= d_tilde) 时返回 0，摩擦能随之自动为 0
+    # 法向接触力大小 N = -db/dd,也就是摩擦公式里的 lambda
+    # 非激活 (d >= d_tilde) 时返回 0,摩擦能随之自动为 0
     d_tilde_squared = d_tilde * d_tilde
 
     if distance_squared >= d_tilde_squared:
         return 0.0
 
-    # d = 0 说明已经穿透，交给 CCD 去避免，这里只做保护
+    # d = 0 说明已经穿透,交给 CCD 去避免,这里只做保护
     if distance_squared <= 1.0e-24:
         return 0.0
 
     difference = distance_squared - d_tilde_squared
     ratio = distance_squared / d_tilde_squared
 
-    # b(u) = -kappa * (u - u_tilde)^2 * log(u / u_tilde)，u = d^2
+    # b(u) = -kappa * (u - u_tilde)^2 * log(u / u_tilde),u = d^2
     # db/du = -kappa * [ 2(u - u_tilde) * log(u/u_tilde) + (u - u_tilde)^2 / u ]
     db_du = -kappa * (
         2.0 * difference * wp.log(ratio)
